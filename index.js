@@ -6,6 +6,7 @@ const https     = require('https');
 const colors    = require('colors');
 const asn1      = require('asn1.js');
 const jws       = require('jws');
+const jwkToPem = require('jwk-to-pem');
 require('./shim');
 
 var ECPrivateKeyASN = asn1.define('ECPrivateKey', function() {
@@ -17,10 +18,10 @@ var ECPrivateKeyASN = asn1.define('ECPrivateKey', function() {
   )
 });
 
-function toPEM(key) {
+function toPEM(privateKey) {
   return ECPrivateKeyASN.encode({
     version: 1,
-    privateKey: key,
+    privateKey: privateKey,
     parameters: [1, 2, 840, 10045, 3, 1, 7], // prime256v1
   }, 'pem', {
     label: 'EC PRIVATE KEY',
@@ -34,6 +35,68 @@ function generateVAPIDKeys() {
   return {
     publicKey: curve.getPublicKey(),
     privateKey: curve.getPrivateKey(),
+  };
+}
+
+function getVapidHeaders(vapid) {
+  if (!vapid.audience) {
+    throw new Error('No audient set');
+  }
+
+  if (!vapid.subject) {
+    throw new Error('No subject set');
+  }
+
+  if (!vapid.publicKey) {
+    throw new Error('No publicKey set');
+  }
+
+  if (!vapid.privateKey) {
+    throw new Error('No privateKey set');
+  }
+
+  var tokenHeader = {
+    typ: 'JWT',
+    alg: 'ES256'
+  };
+
+  // The `exp` field will contain the current timestamp in UTC plus twelve hours.
+  var tokenBody = {
+    aud: vapid.audience,
+    exp: vapid.expiration ? vapid.expiration :
+      (Math.floor((Date.now() / 1000) + 12 * 60 * 60)),
+    sub: vapid.subject,
+  };
+
+  var privatePEM = jwkToPem({
+      crv: 'P-256',
+      kty: 'EC',
+      x: urlBase64.encode(vapid.publicKey.slice(1, 33)),
+      y: urlBase64.encode(vapid.publicKey.slice(33, 65)),
+      d: urlBase64.encode(vapid.privateKey)
+  }, { private: true });
+
+  /** console.log();
+  console.log(privatePEM);
+  console.log();
+  console.log(toPEM(vapid.privateKey));
+  console.log();**/
+
+  var signObj = {
+    header: tokenHeader,
+    payload: tokenBody,
+    privateKey: privatePEM
+  };
+
+  var jwt = jws.sign(signObj);
+
+  console.log();
+  console.log('Signed JWT', jwt);
+  console.log();
+
+  return {
+    bearer: jwt,
+    p256ecdsa: urlBase64.encode(vapid.publicKey)
   };
 }
 
@@ -114,11 +177,13 @@ function encrypt(userPublicKey, userAuth, payload) {
 function sendNotification(endpoint, params) {
   var args = arguments;
 
+  if (args.length === 0) {
+    return Promise.reject(new Error('sendNotification requires at least one argument, the endpoint URL'));
+  }
+
   return new Promise(function(resolve, reject) {
     try {
-      if (args.length === 0) {
-        throw new Error('sendNotification requires at least one argument, the endpoint URL');
-      } else if (params && typeof params === 'object') {
+      if (params && typeof params === 'object') {
         var TTL = params.TTL;
         var userPublicKey = params.userPublicKey;
         var userAuth = params.userAuth;
@@ -146,8 +211,6 @@ function sendNotification(endpoint, params) {
           throw new Error('userAuth should be at least 16 bytes long');
         }
       }
-
-      const isGCM = endpoint.indexOf('https://android.googleapis.com/gcm/send') === 0;
 
       var urlParts = url.parse(endpoint);
       var options = {
@@ -188,26 +251,14 @@ function sendNotification(endpoint, params) {
         requestPayload = encrypted.cipherText;
       }
 
+      const isGCM = endpoint.indexOf('https://android.googleapis.com/gcm/send') === 0;
       if (isGCM) {
         if (!gcmAPIKey) {
           console.warn('Attempt to send push notification to GCM endpoint, but no GCM key is defined'.bold.red);
+          throw new Error('No GCM api key set for a GCM endpoint. Please use setGCMAPIKey().');
         }
-
-        var endpointSections = endpoint.split('/');
-        var subscriptionId = endpointSections[endpointSections.length - 1];
-
-        var gcmObj = {
-          registration_ids: [ subscriptionId ],
-        };
-        if (requestPayload) {
-          gcmObj['raw_data'] = requestPayload.toString('base64');
-        }
-        requestPayload = JSON.stringify(gcmObj);
-
-        options.path = options.path.substring(0, options.path.length - subscriptionId.length - 1);
 
         options.headers['Authorization'] = 'key=' + gcmAPIKey;
-        options.headers['Content-Type'] = 'application/json';
       }
 
       if (vapid && !isGCM && (typeof payload === 'undefined' || 'Crypto-Key' in options.headers)) {
@@ -215,29 +266,15 @@ function sendNotification(endpoint, params) {
         // We also can't use it when there's a payload on Firefox 45, because
         // Firefox 45 uses the old standard with Encryption-Key.
 
-        var header = {
-          typ: 'JWT',
-          alg: 'ES256'
-        };
+        vapid.audience = urlParts.protocol + '//' + urlParts.hostname;
+        vapid.subject = 'mailto:this.is.bad@someemail.com';
 
-        var jwtPayload = {
-          aud: vapid.audience,
-          exp: Math.floor(Date.now() / 1000) + 86400,
-          sub: vapid.subject,
-        };
-
-        var jwt = jws.sign({
-          header: header,
-          payload: jwtPayload,
-          privateKey: toPEM(vapid.privateKey),
-        });
-
-        options.headers['Authorization'] = 'Bearer ' + jwt;
-        var key = 'p256ecdsa=' + urlBase64.encode(vapid.publicKey);
+        var vapidHeaders = getVapidHeaders(vapid);
+        options.headers['Authorization'] = 'Bearer ' + vapidHeaders.bearer;
         if (options.headers['Crypto-Key']) {
-          options.headers['Crypto-Key'] += ',' + key;
+          options.headers['Crypto-Key'] += ',' + 'p256ecdsa=' + vapidHeaders.p256ecdsa;
         } else {
-          options.headers['Crypto-Key'] = key;
+          options.headers['Crypto-Key'] = 'p256ecdsa=' + vapidHeaders.p256ecdsa;
         }
       }
 
@@ -251,7 +288,6 @@ function sendNotification(endpoint, params) {
         options.headers['Content-Length'] = requestPayload.length;
       }
 
-      var expectedStatusCode = isGCM ? 200 : 201;
       var pushRequest = https.request(options, function(pushResponse) {
         var body = "";
 
@@ -260,7 +296,7 @@ function sendNotification(endpoint, params) {
         });
 
         pushResponse.on('end', function() {
-          if (pushResponse.statusCode !== expectedStatusCode) {
+          if (pushResponse.statusCode !== 201) {
             reject(new WebPushError('Received unexpected response code', pushResponse.statusCode, pushResponse.headers, body));
           } else {
             resolve(body);
@@ -290,5 +326,6 @@ module.exports = {
   sendNotification: sendNotification,
   setGCMAPIKey: setGCMAPIKey,
   WebPushError: WebPushError,
+  getVapidHeaders: getVapidHeaders,
   generateVAPIDKeys: generateVAPIDKeys,
 };

@@ -3,7 +3,7 @@ var portfinder = require('portfinder');
 var fs = require('fs');
 var path = require('path');
 
-function createServer(options, webPush) {
+function createServer(options, webPush, sendPushCB) {
   var demoPath = 'test/data/demo';
   var pushPayload = null;
   var vapid = null;
@@ -16,7 +16,9 @@ function createServer(options, webPush) {
   var server = http.createServer(function(req, res) {
     try {
       if (req.method === 'GET') {
-        if (req.url === '/') {
+        // Ignore query parameters which are used to inject application keys
+        var urlParts = req.url.split('?');
+        if (urlParts[0] === '/') {
           req.url = '/index.html';
         }
 
@@ -33,6 +35,19 @@ function createServer(options, webPush) {
           'Content-Type': path.extname(req.url) === '.html' ? 'text/html' : 'application/javascript',
         });
         res.end(data);
+      } else if (req.method === 'POST') {
+        if (req.url === '/api/trigger-push') {
+          var data = '';
+          req.on('data', chunk => {
+            data += chunk;
+          });
+
+          req.on('end', chunk => {
+            var subscription = JSON.parse(data);
+            sendPushCB(subscription);
+            res.end('ok');
+          });
+        }
       } else {
         throw new Error('Unable to handle post requests.');
       }

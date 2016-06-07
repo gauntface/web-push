@@ -1,4 +1,6 @@
 var assert = require('assert');
+var url = require('url');
+var urlBase64 = require('urlsafe-base64');
 var webPush = require('../index');
 var createServer = require('./helpers/create-server');
 var isPortOpen = require('./helpers/port-open');
@@ -20,11 +22,12 @@ suite('selenium', function() {
   var firefoxBrowsers = require('./browser-managers/firefox-browsers.js');
   var chromeBrowsers = require('./browser-managers/chrome-browsers.js');
 
-  var VAPID_PARAM = {
-    audience: 'https://www.mozilla.org/',
+  var vapidKeys = webPush.generateVAPIDKeys();
+
+  const VAPID_PARAM = {
     subject: 'mailto:web-push@mozilla.org',
-    privateKey: new Buffer('H6tqEMswzHOFlPHFi2JPfDQRiKN32ZJIwvSPWZl1VTA=', 'base64'),
-    publicKey: new Buffer('BIx6khu9Z/5lBwNEXYNEOQiL70IKYDpDxsTyoiCb82puQ/V4c/NFdyrBFpWdsz3mikmV6sWARNuhRbbbLTMOmB0=', 'base64'),
+    privateKey: vapidKeys.privateKey,
+    publicKey: vapidKeys.publicKey,
   };
   var globalServer, globalDriver;
 
@@ -83,7 +86,12 @@ suite('selenium', function() {
       // Tests will likely expect a native promise with then and catch
       // Not the web driver promise of then and thenCatch
       return new Promise(function(resolve, reject) {
-        globalDriver.get('http://127.0.0.1:' + globalServer.port)
+        var testUrl = 'http://127.0.0.1:' + globalServer.port;
+        if (options.vapid) {
+          testUrl += '?vapid=' + urlBase64.encode(options.vapid.publicKey);
+        }
+
+        globalDriver.get(testUrl)
         .then(function() {
           return globalDriver.executeScript(function() {
             return typeof navigator.serviceWorker !== 'undefined';
@@ -133,15 +141,16 @@ suite('selenium', function() {
             throw new Error('No subscription found.');
           }
 
-          // console.log('Push Application Server - Register: ' + obj.endpoint);
-          // console.log('Push Application Server - Send notification to ' + obj.endpoint);
-
           var promise;
           var pushPayload = null;
           var vapid = null;
           if (options) {
             pushPayload = options.payload;
             vapid = options.vapid;
+          }
+
+          if (vapid) {
+            vapid.audience = url.parse(subscription.endpoint).hostname;
           }
 
           if (!pushPayload) {
@@ -177,6 +186,7 @@ suite('selenium', function() {
           resolve();
         })
         .thenCatch(function(err) {
+          console.log(err);
           reject(err);
         });
       });
