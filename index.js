@@ -6,7 +6,10 @@ const https     = require('https');
 const colors    = require('colors');
 const asn1      = require('asn1.js');
 const jws       = require('jws');
-const jwkToPem = require('jwk-to-pem');
+const jwkToPem  = require('jwk-to-pem');
+const fs        = require('fs');
+const eccrypto  = require("eccrypto");
+
 require('./shim');
 
 var ECPrivateKeyASN = asn1.define('ECPrivateKey', function() {
@@ -18,10 +21,10 @@ var ECPrivateKeyASN = asn1.define('ECPrivateKey', function() {
   )
 });
 
-function toPEM(privateKey) {
+function toPEM(key) {
   return ECPrivateKeyASN.encode({
     version: 1,
-    privateKey: privateKey,
+    privateKey: key,
     parameters: [1, 2, 840, 10045, 3, 1, 7], // prime256v1
   }, 'pem', {
     label: 'EC PRIVATE KEY',
@@ -40,7 +43,7 @@ function generateVAPIDKeys() {
 
 function getVapidHeaders(vapid) {
   if (!vapid.audience) {
-    throw new Error('No audient set');
+    throw new Error('No audience set');
   }
 
   if (!vapid.subject) {
@@ -55,6 +58,8 @@ function getVapidHeaders(vapid) {
     throw new Error('No privateKey set');
   }
 
+  console.log('vapid', vapid);
+
   var tokenHeader = {
     typ: 'JWT',
     alg: 'ES256'
@@ -62,42 +67,22 @@ function getVapidHeaders(vapid) {
 
   // The `exp` field will contain the current timestamp in UTC plus twelve hours.
   var tokenBody = {
-    aud: vapid.audience,
+    aud: 'https://www.mozilla.org/', // vapid.audience,
     exp: vapid.expiration ? vapid.expiration :
       (Math.floor((Date.now() / 1000) + 12 * 60 * 60)),
     sub: vapid.subject,
   };
 
-  var privatePEM = jwkToPem({
-      crv: 'P-256',
-      kty: 'EC',
-      x: urlBase64.encode(vapid.publicKey.slice(1, 33)),
-      y: urlBase64.encode(vapid.publicKey.slice(33, 65)),
-      d: urlBase64.encode(vapid.privateKey)
-  }, { private: true });
-
-  /** console.log();
-  console.log(privatePEM);
-  console.log();
-  console.log(toPEM(vapid.privateKey));
-  console.log();**/
-
-  var signObj = {
+  var jwt = jws.sign({
     header: tokenHeader,
     payload: tokenBody,
-    privateKey: privatePEM
-  };
+    privateKey: toPEM(vapid.privateKey),
+  });
 
-  var jwt = jws.sign(signObj);
-
-  console.log();
-  console.log('Signed JWT', jwt);
-  console.log();
-
-  return {
+  return Promise.resolve({
     bearer: jwt,
     p256ecdsa: urlBase64.encode(vapid.publicKey)
-  };
+  });
 }
 
 function WebPushError(message, statusCode, headers, body) {
@@ -181,114 +166,123 @@ function sendNotification(endpoint, params) {
     return Promise.reject(new Error('sendNotification requires at least one argument, the endpoint URL'));
   }
 
-  return new Promise(function(resolve, reject) {
-    try {
-      if (params && typeof params === 'object') {
-        var TTL = params.TTL;
-        var userPublicKey = params.userPublicKey;
-        var userAuth = params.userAuth;
-        var payload = params.payload;
-        var vapid = params.vapid;
-      } else if (args.length !== 1) {
-        var TTL = args[1];
-        var userPublicKey = args[2];
-        var payload = args[3];
-        console.warn('You are using the old, deprecated, interface of the `sendNotification` function.'.bold.red);
-      }
+  if (params && typeof params === 'object') {
+    var TTL = params.TTL;
+    var userPublicKey = params.userPublicKey;
+    var userAuth = params.userAuth;
+    var payload = params.payload;
+    var vapid = params.vapid;
+  } else if (args.length !== 1) {
+    var TTL = args[1];
+    var userPublicKey = args[2];
+    var payload = args[3];
+    console.warn('You are using the old, deprecated, interface of the `sendNotification` function.'.bold.red);
+  }
 
-      if (userPublicKey) {
-        if (typeof userPublicKey !== 'string') {
-          throw new Error('userPublicKey should be a base64-encoded string.');
-        } else if (urlBase64.decode(userPublicKey).length !== 65) {
-          throw new Error('userPublicKey should be 65 bytes long.');
-        }
-      }
+  var urlParts = url.parse(endpoint);
 
+  const isGCM = endpoint.indexOf('https://android.googleapis.com/gcm/send') === 0;
+  vapid.audience = urlParts.protocol + '//' + urlParts.hostname;
+  vapid.subject = 'mailto:this.is.bad@someemail.com';
+
+  return getVapidHeaders(vapid)
+  .then(vapidHeaders => {
+    console.log(vapidHeaders);
+    if (userPublicKey) {
+      if (typeof userPublicKey !== 'string') {
+        throw new Error('userPublicKey should be a base64-encoded string.');
+      } else if (urlBase64.decode(userPublicKey).length !== 65) {
+        throw new Error('userPublicKey should be 65 bytes long.');
+      }
+    }
+
+    if (userAuth) {
+      if (typeof userAuth !== 'string') {
+        throw new Error('userAuth should be a base64-encoded string.');
+      } else if (urlBase64.decode(userAuth).length < 16) {
+        throw new Error('userAuth should be at least 16 bytes long');
+      }
+    }
+
+    var options = {
+      hostname: urlParts.hostname,
+      port: urlParts.port,
+      path: urlParts.pathname,
+      method: 'POST',
+      headers: {
+        'Content-Length': 0,
+      }
+    };
+
+    var requestPayload;
+    if (typeof payload !== 'undefined') {
+      var encrypted;
+      var encodingHeader;
+      var cryptoHeaderName;
       if (userAuth) {
-        if (typeof userAuth !== 'string') {
-          throw new Error('userAuth should be a base64-encoded string.');
-        } else if (urlBase64.decode(userAuth).length < 16) {
-          throw new Error('userAuth should be at least 16 bytes long');
-        }
+        // Use the new standard if userAuth is defined (Firefox 46+ and Chrome 50+).
+        encrypted = encrypt(userPublicKey, userAuth, payload);
+        encodingHeader = 'aesgcm';
+        cryptoHeaderName = 'Crypto-Key';
+      } else {
+        // Use the old standard if userAuth isn't defined (up to Firefox 45).
+        encrypted = encryptOld(userPublicKey, payload);
+        encodingHeader = 'aesgcm128';
+        cryptoHeaderName = 'Encryption-Key';
       }
 
-      var urlParts = url.parse(endpoint);
-      var options = {
-        hostname: urlParts.hostname,
-        port: urlParts.port,
-        path: urlParts.pathname,
-        method: 'POST',
-        headers: {
-          'Content-Length': 0,
-        }
+      options.headers = {
+        'Content-Type': 'application/octet-stream',
+        'Content-Encoding': encodingHeader,
+        'Encryption': 'keyid=p256dh;salt=' + encrypted.salt,
       };
 
-      var requestPayload;
-      if (typeof payload !== 'undefined') {
-        var encrypted;
-        var encodingHeader;
-        var cryptoHeaderName;
-        if (userAuth) {
-          // Use the new standard if userAuth is defined (Firefox 46+ and Chrome 50+).
-          encrypted = encrypt(userPublicKey, userAuth, payload);
-          encodingHeader = 'aesgcm';
-          cryptoHeaderName = 'Crypto-Key';
-        } else {
-          // Use the old standard if userAuth isn't defined (up to Firefox 45).
-          encrypted = encryptOld(userPublicKey, payload);
-          encodingHeader = 'aesgcm128';
-          cryptoHeaderName = 'Encryption-Key';
-        }
+      options.headers[cryptoHeaderName] = 'keyid=p256dh;dh=' + urlBase64.encode(encrypted.localPublicKey);
 
-        options.headers = {
-          'Content-Type': 'application/octet-stream',
-          'Content-Encoding': encodingHeader,
-          'Encryption': 'keyid=p256dh;salt=' + encrypted.salt,
-        };
+      requestPayload = encrypted.cipherText;
+    }
 
-        options.headers[cryptoHeaderName] = 'keyid=p256dh;dh=' + urlBase64.encode(encrypted.localPublicKey);
-
-        requestPayload = encrypted.cipherText;
+    if (isGCM) {
+      if (!gcmAPIKey) {
+        console.warn('Attempt to send push notification to GCM endpoint, but no GCM key is defined'.bold.red);
+        throw new Error('No GCM api key set for a GCM endpoint. Please use setGCMAPIKey().');
       }
 
-      const isGCM = endpoint.indexOf('https://android.googleapis.com/gcm/send') === 0;
-      if (isGCM) {
-        if (!gcmAPIKey) {
-          console.warn('Attempt to send push notification to GCM endpoint, but no GCM key is defined'.bold.red);
-          throw new Error('No GCM api key set for a GCM endpoint. Please use setGCMAPIKey().');
-        }
+      options.headers['Authorization'] = 'key=' + gcmAPIKey;
+    }
 
-        options.headers['Authorization'] = 'key=' + gcmAPIKey;
-      }
+    if (vapid && !isGCM && (typeof payload === 'undefined' || 'Crypto-Key' in options.headers)) {
+      // VAPID isn't supported by GCM.
+      // We also can't use it when there's a payload on Firefox 45, because
+      // Firefox 45 uses the old standard with Encryption-Key.
 
-      if (vapid && !isGCM && (typeof payload === 'undefined' || 'Crypto-Key' in options.headers)) {
-        // VAPID isn't supported by GCM.
-        // We also can't use it when there's a payload on Firefox 45, because
-        // Firefox 45 uses the old standard with Encryption-Key.
-
-        vapid.audience = urlParts.protocol + '//' + urlParts.hostname;
-        vapid.subject = 'mailto:this.is.bad@someemail.com';
-
-        var vapidHeaders = getVapidHeaders(vapid);
-        options.headers['Authorization'] = 'Bearer ' + vapidHeaders.bearer;
-        if (options.headers['Crypto-Key']) {
-          options.headers['Crypto-Key'] += ',' + 'p256ecdsa=' + vapidHeaders.p256ecdsa;
-        } else {
-          options.headers['Crypto-Key'] = 'p256ecdsa=' + vapidHeaders.p256ecdsa;
-        }
-      }
-
-      if (typeof TTL !== 'undefined') {
-        options.headers['TTL'] = TTL;
+      options.headers['Authorization'] = 'Bearer ' + vapidHeaders.bearer;
+      if (options.headers['Crypto-Key']) {
+        options.headers['Crypto-Key'] += ',' + 'p256ecdsa=' + vapidHeaders.p256ecdsa;
       } else {
-        options.headers['TTL'] = 2419200; // Default TTL is four weeks.
+        options.headers['Crypto-Key'] = 'p256ecdsa=' + vapidHeaders.p256ecdsa;
       }
+    }
 
-      if (requestPayload) {
-        options.headers['Content-Length'] = requestPayload.length;
-      }
+    if (typeof TTL !== 'undefined') {
+      options.headers['TTL'] = TTL;
+    } else {
+      options.headers['TTL'] = 2419200; // Default TTL is four weeks.
+    }
 
-      var pushRequest = https.request(options, function(pushResponse) {
+    if (requestPayload) {
+      options.headers['Content-Length'] = requestPayload.length;
+    }
+
+    return {
+      options: options,
+      requestPayload: requestPayload
+    };
+  })
+  .then(results => {
+    console.log(results.options);
+    return new Promise((resolve, reject) => {
+      var pushRequest = https.request(results.options, function(pushResponse) {
         var body = "";
 
         pushResponse.on('data', function(chunk) {
@@ -304,8 +298,8 @@ function sendNotification(endpoint, params) {
         });
       });
 
-      if (requestPayload) {
-        pushRequest.write(requestPayload);
+      if (results.requestPayload) {
+        pushRequest.write(results.requestPayload);
       }
 
       pushRequest.end();
@@ -314,9 +308,7 @@ function sendNotification(endpoint, params) {
         console.error(e);
         reject(e);
       });
-    } catch (e) {
-      reject(e);
-    }
+    });
   });
 }
 

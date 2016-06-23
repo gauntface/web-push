@@ -32,6 +32,7 @@
     "buffer-equals-polyfill": "^1.0.0",
     "colors": "^1.1.2",
     "create-ecdh": "^4.0.0",
+    "eccrypto": "^1.0.3",
     "http_ece": "^0.5.1",
     "jwk-to-pem": "^1.2.5",
     "jws": "^3.1.3",

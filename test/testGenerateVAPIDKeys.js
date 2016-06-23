@@ -1,6 +1,7 @@
 var assert    = require('assert');
 var crypto    = require('crypto');
 var webPush   = require('../index');
+var fs        = require('fs');
 
 suite('vapid', function() {
   var VALID_VAPID_KEYS = {
@@ -25,19 +26,20 @@ suite('vapid', function() {
   });
 
   test('vapid headers', function() {
-    var vapidHeaders = webPush.getVapidHeaders({
+    return webPush.getVapidHeaders({
       publicKey: new Buffer(VALID_VAPID_KEYS.publicKey, 'base64'),
       privateKey: new Buffer(VALID_VAPID_KEYS.privateKey, 'base64'),
       audience: 'https://fcm.googleapis.com',
       expiration: VALID_OUTPUT.expiration,
       subject: 'mailto:web-push@mozilla.org'
+    })
+    .then(vapidHeaders => {
+      assert(vapidHeaders instanceof Object);
+      assert(typeof vapidHeaders.bearer === 'string');
+      assert(typeof vapidHeaders.p256ecdsa === 'string');
+
+      assert(vapidHeaders.p256ecdsa === VALID_OUTPUT.p256ecdsa);
+      assert(vapidHeaders.bearer.indexOf(VALID_OUTPUT.unsignedToken) === 0);
     });
-
-    assert(vapidHeaders instanceof Object);
-    assert(typeof vapidHeaders.bearer === 'string');
-    assert(typeof vapidHeaders.p256ecdsa === 'string');
-
-    assert(vapidHeaders.p256ecdsa === VALID_OUTPUT.p256ecdsa);
-    assert(vapidHeaders.bearer.indexOf(VALID_OUTPUT.unsignedToken) === 0);
   });
 });

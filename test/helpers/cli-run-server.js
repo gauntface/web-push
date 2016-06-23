@@ -1,12 +1,12 @@
 var webPush = require('../../index');
 var createServer = require('./create-server');
 var urlBase64 = require('urlsafe-base64');
+var fs           = require('fs');
 
 var VAPID = {
-  public: 'BBCfX1ZO2Ckjasb99j1HzG-mI8S2f9IuBrGBqnlFImpYydnHJE6JjihdTZONYNv6oUCOG8z15jqstfVJZvwq-C4',
-  private: '1BScQihYj68cZcgwtMDEoJD55c8Fv9DgCBLNLE7FeG0'
+  public: 'BCkFDkye4m-ogGYUQyj-Z9975u1r0xgOApNpFVwWP1AoGOkvedxiTtDOze-d3DOel6dxws48bujRxhWc59cNclM',
+  private: 'x3AfXDRFD3zTttp80wA_2DJ1MVYVYkeIkOiW-bt7RNI'
 };
-
 createServer({}, webPush, subscription => {
   webPush.sendNotification(subscription.endpoint, {
     vapid: {
