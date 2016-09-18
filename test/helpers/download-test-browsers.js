@@ -29,5 +29,9 @@
   return Promise.all(promises)
   .then(function() {
     console.log('Download complete.');
+    /* eslint-disable global-require*/
+    const which = require('which');
+    /* eslint-enable global-require*/
+    console.log('which geckodriver: ', which.sync('geckodriver'));
   });
 })();
