@@ -35,6 +35,7 @@
     console.log('which geckodriver: ', which.sync('geckodriver'));
   })
   .catch(function(err) {
-    console.log('ERROR in Download.', err);
+    console.error('Unable to download browsers and Geckodriver.', err);
+    process.exit(1);
   });
 })();
