@@ -33,5 +33,8 @@
     const which = require('which');
     /* eslint-enable global-require*/
     console.log('which geckodriver: ', which.sync('geckodriver'));
+  })
+  .catch(function(err) {
+    console.log('ERROR in Download.', err);
   });
 })();
