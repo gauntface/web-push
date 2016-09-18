@@ -59,6 +59,7 @@
       process.platform === 'darwin' &&
       process.env.TRAVIS === 'true') {
       const which = require('which');
+      console.log('PATH: ', process.env.PATH);
       console.log('which geckodriver: ', which.sync('geckodriver'));
     }
 
